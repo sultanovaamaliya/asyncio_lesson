@@ -1,41 +1,27 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 
-import re
-import sys
 import time
-
-import httpx
+import sys
+import re
 from collections import defaultdict
 from urllib.parse import quote, unquote
+import aiohttp
+import asyncio
 
 USER_AGENT = (
     "WikiPhilosophyBot/1.0 "
     "(contact: sultanova.amaliya@list.ru)"
 )
 
-CLIENT = httpx.Client(
-    headers={"User-Agent": USER_AGENT},
-    follow_redirects=True,
-    timeout=10,
-)
 
-
-def get_content(name):
+async def get_content(session, name):
     url = f'https://ru.wikipedia.org/wiki/{quote(name)}'
     try:
-        response = CLIENT.get(url)
-        response.raise_for_status()
-        return response.text
-    except httpx.HTTPError:
+        async with session.get(url, allow_redirects=True) as response:
+            response.raise_for_status()
+            return await response.text()
+    except Exception:
         return None
-
-
-def remove_duplicates(iterator):
-    seen = set()
-    for item in iterator:
-        if item not in seen:
-            yield item
-            seen.add(item)
 
 
 def extract_links(page):
@@ -62,18 +48,26 @@ def extract_links(page):
     return links
 
 
-def build_node(frontier):
-    for name in frontier:
-        page = get_content(name)
+async def build_node(session, frontier):
+    pairs = []
+    tasks = []
 
+    for name in frontier:
+        tasks.append(get_content(session, name))
+
+    pages = await asyncio.gather(*tasks)
+
+    for name, page in zip(frontier, pages):
         if page is None:
             continue
 
         for link in extract_links(page):
-            yield (name, link)
+            pairs.append((name, link))
+
+    return pairs
 
 
-def build_graph(start, finish):
+async def build_graph(session, start, finish):
     graph = defaultdict(set)
     visited = set()
     frontier = [start]
@@ -84,8 +78,9 @@ def build_graph(start, finish):
             return graph
 
         new_front = []
+        results = await build_node(session, frontier)
 
-        for (name, link) in build_node(frontier):
+        for name, link in results:
             visited.add(name.casefold())
 
             graph[name].add(link)
@@ -95,7 +90,7 @@ def build_graph(start, finish):
             if link.casefold() == cf_finish:
                 return graph
 
-        frontier = list(remove_duplicates(new_front))
+        frontier = list(set(new_front))
 
     return graph
 
@@ -133,14 +128,17 @@ def find_chain(graph, start, finish):
                 return _get_track(start, item, backtrack)
 
 
-def main():
+async def main():
     if len(sys.argv) < 2:
         sys.exit("Start word is not specified")
 
     params = (sys.argv[1], 'Философия')
+    headers = {"User-Agent": USER_AGENT}
 
     start = time.time()
-    graph = build_graph(*params)
+    async with aiohttp.ClientSession(headers=headers) as session:
+        graph = await build_graph(session, *params)
+
     chain = find_chain(graph, *params)
     time_len = time.time() - start
 
@@ -152,4 +150,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except RuntimeError:
+        pass
